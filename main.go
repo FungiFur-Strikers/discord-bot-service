@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"backend/bot"
+	"backend/dify"
 	"backend/flow"
 
 	"github.com/bwmarrin/discordgo"
@@ -25,8 +28,9 @@ type DifyInput struct {
 }
 
 var (
-	difyClients = make(map[string]*Dify)
-	mu          sync.RWMutex
+	difyClients     = make(map[string]*Dify)
+	mu              sync.RWMutex
+	conversationIds = make(map[string]string)
 )
 
 func main() {
@@ -101,39 +105,101 @@ func addDify(c *gin.Context) {
 	c.JSON(200, dify)
 }
 
-func startNodeExecutor(node flow.Node, m *discordgo.MessageCreate) (flow.NodeResult, error) {
+func startNodeExecutor(props flow.NodeProps) (flow.NodeResult, error) {
 	return flow.NodeResult{
 		Type:     "start",
 		Continue: true,
 	}, nil
 }
-func serverNodeExecutor(node flow.Node, m *discordgo.MessageCreate) (flow.NodeResult, error) {
+func serverNodeExecutor(props flow.NodeProps) (flow.NodeResult, error) {
 	return flow.NodeResult{
 		Type:     "server",
-		Continue: m.GuildID == node.ID,
+		Continue: props.Message.GuildID == props.Node.ID,
 	}, nil
 }
-func channelNodeExecutor(node flow.Node, m *discordgo.MessageCreate) (flow.NodeResult, error) {
+func channelNodeExecutor(props flow.NodeProps) (flow.NodeResult, error) {
 
 	return flow.NodeResult{
 		Type:     "channel",
-		Continue: m.ChannelID == node.ID,
+		Continue: props.Message.ChannelID == props.Node.ID,
 	}, nil
 }
-func difyNodeExecutor(node flow.Node, m *discordgo.MessageCreate) (flow.NodeResult, error) {
-	// エンドノードのロジックを実装
-	println("dify")
+func difyNodeExecutor(props flow.NodeProps) (flow.NodeResult, error) {
+	log.Printf("??: %v", props.Node.Data.Label)
+	botConfig := difyClients[props.Node.Data.Label]
+	log.Printf("dify: %v", botConfig)
+	if botConfig == nil {
+		log.Printf("??: %v", props.Node.Data.Label+"が見つからない")
+		return flow.NodeResult{
+			Type:     "dify",
+			Continue: true,
+		}, nil
+
+	}
+
+	cleanContent := strings.ReplaceAll(props.Message.Content, "<@"+props.Session.State.User.ID+">", "")
+	cleanContent = strings.TrimSpace(cleanContent)
+	conversationId := conversationIds[props.Message.ChannelID]
+	response, err := dify.GenerateMessage(botConfig.Url, botConfig.Token, conversationId, props.Message.ChannelID+"zzxxxMxxzz"+cleanContent)
+	if err != nil {
+		SendMessage(props.Session, props.Message.ChannelID, err.Error())
+		return flow.NodeResult{
+			Type:     "dify",
+			Continue: false,
+		}, nil
+	}
+	SendMessage(props.Session, props.Message.ChannelID, response.Answer)
 
 	return flow.NodeResult{
 		Type:     "dify",
 		Continue: true,
 	}, nil
 }
-func discordReplyNodeExecutor(node flow.Node, m *discordgo.MessageCreate) (flow.NodeResult, error) {
+func discordReplyNodeExecutor(props flow.NodeProps) (flow.NodeResult, error) {
 	// エンドノードのロジックを実装
-	log.Printf("Rep: %v", node.Data)
 	return flow.NodeResult{
 		Type:     "Rep",
 		Continue: true,
 	}, nil
+}
+
+const maxMessageLength = 1000
+
+// Function to split a message into chunks
+func SplitMessage(message string) []string {
+	if len(message) <= maxMessageLength {
+		return []string{message}
+	}
+
+	var chunks []string
+	var buffer strings.Builder
+	words := strings.Split(message, " ")
+
+	for _, word := range words {
+		if buffer.Len()+len(word)+1 > maxMessageLength {
+			chunks = append(chunks, buffer.String())
+			buffer.Reset()
+		}
+		if buffer.Len() > 0 {
+			buffer.WriteString(" ")
+		}
+		buffer.WriteString(word)
+	}
+
+	if buffer.Len() > 0 {
+		chunks = append(chunks, buffer.String())
+	}
+
+	return chunks
+}
+
+// Function to send a message and split it if necessary
+func SendMessage(session *discordgo.Session, channelID, message string) {
+	chunks := SplitMessage(message)
+	for _, chunk := range chunks {
+		_, err := session.ChannelMessageSend(channelID, chunk)
+		if err != nil {
+			fmt.Println("Error sending message:", err)
+		}
+	}
 }

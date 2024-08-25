@@ -15,13 +15,16 @@ type Edge struct {
 
 type Node struct {
 	// Add fields as needed
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Data     any    `json:"data"`
-	Position any    `json:"position"`
-	Measured any    `json:"measured"`
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`
+	Data     NodeData `json:"data"`
+	Position any      `json:"position"`
+	Measured any      `json:"measured"`
 }
 
+type NodeData struct {
+	Label string `json:"label"`
+}
 type NodeResult struct {
 	Type     string
 	Continue bool

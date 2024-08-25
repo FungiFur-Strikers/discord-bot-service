@@ -8,8 +8,14 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+type NodeProps struct {
+	Node    Node
+	Message *discordgo.MessageCreate
+	Session *discordgo.Session
+}
+
 // NodeExecutor 各ノードタイプの実行ロジックを定義する関数型
-type NodeExecutor func(node Node, m *discordgo.MessageCreate) (NodeResult, error)
+type NodeExecutor func(NodeProps) (NodeResult, error)
 
 // FlowExecutor フロー全体の実行を管理する構造体
 type FlowExecutor struct {
@@ -29,7 +35,7 @@ func (fe *FlowExecutor) RegisterNodeExecutor(nodeType string, executor NodeExecu
 }
 
 // ExecuteFlow フロー全体を実行し、各ノードの結果を返します
-func (fe *FlowExecutor) ExecuteFlow(flow FlowData, m *discordgo.MessageCreate) (map[string]NodeResult, error) {
+func (fe *FlowExecutor) ExecuteFlow(flow FlowData, m *discordgo.MessageCreate, s *discordgo.Session) (map[string]NodeResult, error) {
 	results := make(map[string]NodeResult)
 	visited := make(map[string]bool)
 
@@ -40,7 +46,7 @@ func (fe *FlowExecutor) ExecuteFlow(flow FlowData, m *discordgo.MessageCreate) (
 	}
 
 	// スタートノードから実行を開始
-	err = fe.executeNode(startNode, flow, visited, results, m)
+	err = fe.executeNode(startNode, flow, visited, results, m, s)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +65,7 @@ func (fe *FlowExecutor) findStartNode(nodes []Node) (Node, error) {
 }
 
 // executeNode は単一のノードを実行し、次のノードへ進みます
-func (fe *FlowExecutor) executeNode(node Node, flow FlowData, visited map[string]bool, results map[string]NodeResult, m *discordgo.MessageCreate) error {
+func (fe *FlowExecutor) executeNode(node Node, flow FlowData, visited map[string]bool, results map[string]NodeResult, m *discordgo.MessageCreate, s *discordgo.Session) error {
 	// ノードが既に訪問済みの場合はスキップ（循環参照対策）
 	if visited[node.ID] {
 		return nil
@@ -73,7 +79,11 @@ func (fe *FlowExecutor) executeNode(node Node, flow FlowData, visited map[string
 	}
 
 	// ノードを実行
-	result, err := executor(node, m)
+	result, err := executor(NodeProps{
+		Node:    node,
+		Message: m,
+		Session: s,
+	})
 	if err != nil {
 		return err
 	}
@@ -86,7 +96,7 @@ func (fe *FlowExecutor) executeNode(node Node, flow FlowData, visited map[string
 	// 次のノードを探して実行
 	nextNodes := fe.findNextNodes(node.ID, flow.Edges, flow.Nodes)
 	for _, nextNode := range nextNodes {
-		err := fe.executeNode(nextNode, flow, visited, results, m)
+		err := fe.executeNode(nextNode, flow, visited, results, m, s)
 		if err != nil {
 			return err
 		}

@@ -6,8 +6,11 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"backend/flow"
 
@@ -82,7 +85,7 @@ func (bm *BotManager) AddBot(c *gin.Context) {
 		println(err)
 		return
 	}
-
+	println(user.Username)
 	bot := Bot{
 		ID:     user.ID,
 		Name:   user.Username,
@@ -192,6 +195,11 @@ func (bm *BotManager) handleMessage(s *discordgo.Session, m *discordgo.MessageCr
 		return
 	}
 
+	// メンションされてない場合
+	if !strings.Contains(m.Content, "<@"+s.State.User.ID+">") {
+		return
+	}
+
 	bm.mu.RLock()
 	botConfig, exists := bm.botConfigs[s.State.User.ID]
 	bm.mu.RUnlock()
@@ -208,7 +216,7 @@ func (bm *BotManager) handleMessage(s *discordgo.Session, m *discordgo.MessageCr
 	}
 
 	// フローを実行
-	_, err := bm.flowExecutor.ExecuteFlow(flowData, m)
+	_, err := bm.flowExecutor.ExecuteFlow(flowData, m, s)
 	if err != nil {
 		// エラーハンドリング（ログ出力など）
 		return
@@ -217,8 +225,10 @@ func (bm *BotManager) handleMessage(s *discordgo.Session, m *discordgo.MessageCr
 	// 例: s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("フロー実行結果: %v", results))
 }
 
-func (bm *BotManager) messageCreate(_ *discordgo.Session, m *discordgo.MessageCreate) {
+func (bm *BotManager) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Create a struct to match the API's expected input
+	cleanMessage := convertMentionsToNames(s, m)
+	cleanMessage = truncateString(cleanMessage, 50)
 	message := struct {
 		Data struct {
 			SentAt    time.Time `json:"sent_at"`
@@ -236,7 +246,7 @@ func (bm *BotManager) messageCreate(_ *discordgo.Session, m *discordgo.MessageCr
 			SentAt:    m.Timestamp,
 			Sender:    m.Author.Username,
 			ChannelID: m.ChannelID,
-			Content:   m.Content,
+			Content:   cleanMessage,
 		},
 	}
 
@@ -247,6 +257,7 @@ func (bm *BotManager) messageCreate(_ *discordgo.Session, m *discordgo.MessageCr
 		return
 	}
 
+	log.Printf("sand: %v", message)
 	// Send the message to the API
 	resp, err := http.Post(bm.ApiURL+"/api/messages", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -258,4 +269,39 @@ func (bm *BotManager) messageCreate(_ *discordgo.Session, m *discordgo.MessageCr
 	if resp.StatusCode != http.StatusCreated {
 		log.Printf("API returned non-201 status code: %d", resp.StatusCode)
 	}
+}
+
+func convertMentionsToNames(s *discordgo.Session, m *discordgo.MessageCreate) string {
+	// メンションを検出する正規表現パターン
+	mentionPattern := regexp.MustCompile(`<@!?(\d+)>`)
+
+	// メッセージ内のすべてのメンションを処理
+	convertedContent := mentionPattern.ReplaceAllStringFunc(m.Content, func(mention string) string {
+		// メンションからユーザーIDを抽出
+		userID := strings.Trim(mention, "<@!>")
+
+		// ユーザー情報を取得
+		user, err := s.User(userID)
+		if err != nil {
+			return mention // エラーが発生した場合は元のメンションを返す
+		}
+
+		// メンションをユーザー名に置き換え
+		return "@" + user.Username
+	})
+
+	return convertedContent
+}
+
+func truncateString(s string, maxLength int) string {
+	if maxLength <= 3 {
+		return "..."
+	}
+
+	runes := []rune(s)
+	if utf8.RuneCountInString(s) <= maxLength {
+		return s
+	}
+
+	return string(runes[:maxLength-3]) + "..."
 }
