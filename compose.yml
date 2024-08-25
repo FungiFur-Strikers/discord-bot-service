@@ -1,0 +1,13 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "12202:8080"
+    volumes:
+      - .:/app
+    command: air -c .air.toml
+
+volumes:
+  postgres_data:
