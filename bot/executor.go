@@ -1,15 +1,21 @@
 // flow/executor.go
-package flow
+package bot
 
 import (
+	"discord-bot-service/internal/models"
 	"errors"
 	"fmt"
 
 	"github.com/bwmarrin/discordgo"
 )
 
+type NodeResult struct {
+	Type     string
+	Continue bool
+}
+
 type NodeProps struct {
-	Node    Node
+	Node    models.Node
 	Message *discordgo.MessageCreate
 	Session *discordgo.Session
 }
@@ -35,7 +41,7 @@ func (fe *FlowExecutor) RegisterNodeExecutor(nodeType string, executor NodeExecu
 }
 
 // ExecuteFlow フロー全体を実行し、各ノードの結果を返します
-func (fe *FlowExecutor) ExecuteFlow(flow FlowData, m *discordgo.MessageCreate, s *discordgo.Session) (map[string]NodeResult, error) {
+func (fe *FlowExecutor) ExecuteFlow(flow models.FlowData, m *discordgo.MessageCreate, s *discordgo.Session) (map[string]NodeResult, error) {
 	results := make(map[string]NodeResult)
 	visited := make(map[string]bool)
 
@@ -55,17 +61,17 @@ func (fe *FlowExecutor) ExecuteFlow(flow FlowData, m *discordgo.MessageCreate, s
 }
 
 // findStartNode はフロー内のスタートノードを探します
-func (fe *FlowExecutor) findStartNode(nodes []Node) (Node, error) {
+func (fe *FlowExecutor) findStartNode(nodes []models.Node) (models.Node, error) {
 	for _, node := range nodes {
 		if node.Type == "start" {
 			return node, nil
 		}
 	}
-	return Node{}, errors.New("スタートノードが見つかりません")
+	return models.Node{}, errors.New("スタートノードが見つかりません")
 }
 
 // executeNode は単一のノードを実行し、次のノードへ進みます
-func (fe *FlowExecutor) executeNode(node Node, flow FlowData, visited map[string]bool, results map[string]NodeResult, m *discordgo.MessageCreate, s *discordgo.Session) error {
+func (fe *FlowExecutor) executeNode(node models.Node, flow models.FlowData, visited map[string]bool, results map[string]NodeResult, m *discordgo.MessageCreate, s *discordgo.Session) error {
 	// ノードが既に訪問済みの場合はスキップ（循環参照対策）
 	if visited[node.ID] {
 		return nil
@@ -94,6 +100,7 @@ func (fe *FlowExecutor) executeNode(node Node, flow FlowData, visited map[string
 	}
 
 	// 次のノードを探して実行
+
 	nextNodes := fe.findNextNodes(node.ID, flow.Edges, flow.Nodes)
 	for _, nextNode := range nextNodes {
 		err := fe.executeNode(nextNode, flow, visited, results, m, s)
@@ -106,8 +113,8 @@ func (fe *FlowExecutor) executeNode(node Node, flow FlowData, visited map[string
 }
 
 // findNextNodes は現在のノードから接続されている次のノードを探します
-func (fe *FlowExecutor) findNextNodes(nodeID string, edges []Edge, nodes []Node) []Node {
-	var nextNodes []Node
+func (fe *FlowExecutor) findNextNodes(nodeID string, edges []models.Edge, nodes []models.Node) []models.Node {
+	var nextNodes []models.Node
 	for _, edge := range edges {
 		if edge.Source == nodeID {
 			for _, node := range nodes {

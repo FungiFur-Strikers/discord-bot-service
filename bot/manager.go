@@ -2,8 +2,9 @@ package bot
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"io"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -12,136 +13,60 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"backend/flow"
+	"discord-bot-service/internal/service"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/gin-gonic/gin"
 )
 
 type BotManager struct {
 	bots         map[string]*discordgo.Session
-	botConfigs   map[string]Bot
-	flowStore    flow.Store
-	flowExecutor *flow.FlowExecutor
+	flowExecutor *FlowExecutor
 	mu           sync.RWMutex
 	ApiURL       string
+	lastId       string
+	flowService  *service.FlowDataService
+	timeout      time.Duration
 }
 
-func NewBotManager(flowStore flow.Store, flowExecutor *flow.FlowExecutor, apiURL string) *BotManager {
+func NewBotManager(flowService *service.FlowDataService, flowExecutor *FlowExecutor, apiURL string) *BotManager {
 	return &BotManager{
 		bots:         make(map[string]*discordgo.Session),
-		botConfigs:   make(map[string]Bot),
-		flowStore:    flowStore,
 		flowExecutor: flowExecutor,
 		ApiURL:       apiURL,
+		flowService:  flowService,
+		timeout:      30 * time.Second,
 	}
 }
 
-func (bm *BotManager) GetBotList(c *gin.Context) {
-	bm.mu.RLock()
-	defer bm.mu.RUnlock()
-
-	botList := make([]Bot, 0, len(bm.botConfigs))
-	for _, bot := range bm.botConfigs {
-		botList = append(botList, bot)
-	}
-
-	c.JSON(200, botList)
-}
-
-func (bm *BotManager) AddBot(c *gin.Context) {
-	var input BotInput
-
-	// 受信したデータをログに出力
-	body, _ := io.ReadAll(c.Request.Body)
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
-	log.Printf("Received data: %s", string(body))
-
-	// JSONデコードを手動で行い、エラーを詳細に確認
-	err := json.Unmarshal(body, &input)
+func (bm *BotManager) AddBot(token string) error {
+	fmt.Println(token)
+	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
-		log.Printf("JSON Unmarshal error: %v", err)
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
-
-	if err := c.ShouldBindJSON(&input); err != nil {
-		log.Printf("Gin binding error: %v", err)
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
-
-	dg, err := discordgo.New("Bot " + input.Token)
-	if err != nil {
-		println(0)
 		println(err)
-		return
+		return err
 	}
 
 	// ボット情報を取得
 	user, err := dg.User("@me")
 	if err != nil {
-		println(1)
 		println(err)
-		return
-	}
-	println(user.Username)
-	bot := Bot{
-		ID:     user.ID,
-		Name:   user.Username,
-		Avatar: user.AvatarURL(""),
-		Guilds: make(map[string]Guild),
-	}
-
-	guilds, err := dg.UserGuilds(100, "", "", true)
-	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to get guilds"})
-		return
-	}
-	for _, g := range guilds {
-		iconURL := discordgo.EndpointGuildIcon(g.ID, g.Icon)
-		guild := Guild{
-			Name:     g.Name,
-			ID:       g.ID,
-			Icon:     iconURL,
-			Channels: make(map[string]Channel),
-		}
-
-		channels, err := dg.GuildChannels(g.ID)
-		if err != nil {
-			log.Printf("Failed to get channels for guild %s: %v", g.ID, err)
-			continue
-		}
-
-		for _, ch := range channels {
-			guild.Channels[ch.ID] = Channel{
-				ID:   ch.ID,
-				Name: ch.Name,
-			}
-		}
-
-		bot.Guilds[g.ID] = guild
+		return err
 	}
 
 	// メッセージハンドラを設定
 	dg.AddHandler(bm.handleMessage)
-	println(3)
 
 	err = dg.Open()
 	if err != nil {
-		println(2)
-
 		println(err)
-		return
+		return err
 	}
 
 	bm.mu.Lock()
-	bm.bots[bot.ID] = dg
-	bm.botConfigs[bot.ID] = bot
+	bm.bots[user.ID] = dg
 	bm.mu.Unlock()
 
-	c.JSON(200, bot)
-
+	return nil
 }
 
 func (bm *BotManager) RemoveBot(botID string) error {
@@ -154,7 +79,6 @@ func (bm *BotManager) RemoveBot(botID string) error {
 			return err
 		}
 		delete(bm.bots, botID)
-		delete(bm.botConfigs, botID)
 	}
 
 	return nil
@@ -189,8 +113,9 @@ func (bm *BotManager) RestartAllBots() error {
 }
 
 func (bm *BotManager) handleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	bm.messageCreate(s, m)
-
+	bm.saveToMessageService(s, m)
+	ctx, cancel := context.WithTimeout(context.Background(), bm.timeout)
+	defer cancel()
 	if m.Author.ID == s.State.User.ID {
 		return
 	}
@@ -200,35 +125,35 @@ func (bm *BotManager) handleMessage(s *discordgo.Session, m *discordgo.MessageCr
 		return
 	}
 
-	bm.mu.RLock()
-	botConfig, exists := bm.botConfigs[s.State.User.ID]
-	bm.mu.RUnlock()
-
-	if !exists {
-		return
-	}
-
 	// ボットIDを使用してフローを取得
-	flowData, ok := bm.flowStore.Get("t" + botConfig.Name)
-	if !ok {
+	flowData, err := bm.flowService.GetFlowData(ctx, s.State.User.Username)
+	if err != nil {
 		// フローが見つからない場合のエラーハンドリング
+		println("flow not found")
+		return
+	}
+	// フローを実行
+	_, err = bm.flowExecutor.ExecuteFlow(*flowData, m, s)
+	if err != nil {
 		return
 	}
 
-	// フローを実行
-	_, err := bm.flowExecutor.ExecuteFlow(flowData, m, s)
-	if err != nil {
-		// エラーハンドリング（ログ出力など）
-		return
-	}
-	// 結果を使用してDiscordに返信するなどの処理
-	// 例: s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("フロー実行結果: %v", results))
 }
 
-func (bm *BotManager) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Create a struct to match the API's expected input
+// メッセージサーバーにメッセージを保存
+func (bm *BotManager) saveToMessageService(s *discordgo.Session, m *discordgo.MessageCreate) {
+	// 多重保存を防止
+	bm.mu.RLock()
+	if bm.lastId == m.ID {
+		return
+	}
+	bm.lastId = m.ID
+	bm.mu.RUnlock()
+
+	// メンションをユーザー名に変更->引用の文字を追加->
 	cleanMessage := convertMentionsToNames(s, m)
-	cleanMessage = truncateString(cleanMessage, 50)
+	cleanMessage = addReplyContextToMessage(s, m) + truncateString(cleanMessage, 500)
+
 	message := struct {
 		Data struct {
 			SentAt    time.Time `json:"sent_at"`
@@ -291,6 +216,40 @@ func convertMentionsToNames(s *discordgo.Session, m *discordgo.MessageCreate) st
 	})
 
 	return convertedContent
+}
+
+func addReplyContextToMessage(s *discordgo.Session, m *discordgo.MessageCreate) string {
+	// メッセージに返信情報がない場合は空文字を返す
+	if m.MessageReference == nil {
+		return ""
+	}
+
+	// 返信元のメッセージを取得
+	referencedMessage, err := s.ChannelMessage(m.MessageReference.ChannelID, m.MessageReference.MessageID)
+	if err != nil {
+		fmt.Printf("Error fetching referenced message: %v\n", err)
+		return ""
+	}
+
+	// 返信元のメッセージ内容を取得（長い場合は省略）
+	referencedContent := truncateString(referencedMessage.Content, 300)
+
+	// 返信元のユーザー名を取得
+	referencedUser, err := s.User(referencedMessage.Author.ID)
+	if err != nil {
+		fmt.Printf("Error fetching referenced user: %v\n", err)
+		return ""
+	}
+
+	// 返信コンテキストを作成（改行対応）
+	lines := strings.Split(referencedContent, "\n")
+	quotedLines := make([]string, len(lines))
+	for i, line := range lines {
+		quotedLines[i] = "> " + line
+	}
+	replyContext := fmt.Sprintf("> %s:\n%s\n\n", referencedUser.Username, strings.Join(quotedLines, "\n"))
+
+	return replyContext
 }
 
 func truncateString(s string, maxLength int) string {
